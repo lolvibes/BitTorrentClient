@@ -3,6 +3,7 @@ import asyncio
 from handeling_peer_message import build_bitfield
 
 
+
 class PieceManager:
 
     def __init__(self,num_pieces,piece_length,total_file_length):
@@ -11,6 +12,10 @@ class PieceManager:
         self.my_piece=set()
         self.piece_in_progress=set()
         self.lock=asyncio.Lock()
+        self.total_file_length=total_file_length
+        self.file=open("test_file_n.bin", "wb")
+        self.file.truncate(total_file_length)
+        self.file_lock=asyncio.Lock()
     async def claim_piece(self, available_piece_indices):
         async with self.lock:
             for indx in available_piece_indices:
@@ -30,18 +35,16 @@ class PieceManager:
     def am_I_done(self):
         return len(self.my_piece) == self.num_pieces
 
-async def test():
-    pm = PieceManager(num_pieces=5, piece_length=1048576, total_file_length=5242880)
-
-    idx = await pm.claim_piece([0, 1, 2, 3, 4])
-    print(f"claimed piece: {idx}")  # should print 0
-
-    idx2 = await pm.claim_piece([0, 1, 2])  # 0 already claimed
-    print(f"claimed piece: {idx2}")  # should print 1
-
-    await pm.release_piece(0, sucess=True)
-    print(f"my_pieces: {pm.my_piece}")  # {0}
-    print(f"done: {pm.am_I_done()}")  # False
-
-
-asyncio.run(test())
+    def get_piece_length(self,piece_index):
+        #for the last piece which are usually shorter than the standard piece lengths
+        if piece_index==self.num_pieces-1:
+            return self.total_file_length - self.piece_length * (self.num_pieces -1)
+        return self.piece_length
+    async def write_piece(self,piece_index,piece_data):
+        offset = piece_index *self.piece_length
+        async with self.file_lock:
+            self.file.seek(offset)
+            self.file.write(piece_data)
+            self.file.flush()
+    def close(self):
+        self.file.close()
