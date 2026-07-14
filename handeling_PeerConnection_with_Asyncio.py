@@ -5,8 +5,8 @@ from matplotlib.style.core import available
 
 from announce import num_pieces
 
-from PieceManagerAttempt1 import generating_peer_bitfield
-from handeling_peer_message import recv_any_message_from_peer, build_bitfield, send_intrested, send_block_req,parser_peice
+from handeling_peer_message import recv_any_message_from_peer, build_bitfield, send_intrested, send_block_req, \
+    parser_peice, bitfield_parser
 from peer_handeling import handshake as h
 # import threading
 from announce import peers
@@ -25,13 +25,7 @@ logging.basicConfig(filename="peerdata.log",level=logging.INFO)
 #     thread=threading.Thread(target=starting_thread,args=(peer,handshake))
 #     thread.start()
 # _______________________________________________________________________________________________________________________________
-async def connect_to_peers(self):
-    handshake = h
-    task = [self.try_connecting_with_peer(peer, handshake) for peer in peers]
-    result = await asyncio.gather(*task)
-    connected_peers = [r for r in result if r != (None, None)]
-    logging.info(len(connected_peers))
-    return connected_peers
+
 class PeerConnection:
     def __init__(self,reader,writer,piece_manager):
         self.reader=reader
@@ -42,7 +36,7 @@ class PeerConnection:
         self.am_interested=False
     async def do_handhsake(self,handshake,peer):
         peer_ip, peer_port = peer
-        self.reader, self.writer = await asyncio.wait_for(asyncio.open_connection(peer_ip, peer_port), timeout=5)
+       # self.reader, self.writer = await asyncio.wait_for(asyncio.open_connection(peer_ip, peer_port), timeout=5)
         self.writer.write(handshake)
         await self.writer.drain()
 
@@ -56,13 +50,15 @@ class PeerConnection:
         return True
 
     async def receive_message(self):
-        await recv_any_message_from_peer(self.reader)
+        return await recv_any_message_from_peer(self.reader)
     async def exchange_bitfields(self):
         message_id, payload = await asyncio.wait_for(self.receive_message(), timeout=5)
         if message_id == 5:
-            peer_bitfield = generating_peer_bitfield(payload)
+            peer_bitfield = bitfield_parser(payload,num_pieces)
             self.remote_bitfield=peer_bitfield
-            self.writer.write((self.piece_manager.get_my_bitfield_bytes()))
+            my_bitfield=await self.piece_manager.get_my_bitfield_bytes()
+            self.writer.write(my_bitfield)
+            await self.writer.drain()
     async def send_interested(self):
         self.writer.write(send_intrested())
 
@@ -75,8 +71,9 @@ class PeerConnection:
         blocks = {}
         print(f"downloading peice {piece_index}")
         for block_num in range(block_numbers):  # looping through our no. of blocks per piece
-                begin = block_num * BLOCK_SIZE  # calculating from where the block should begin
-                send_block_req(self.writer, begin=begin, piece_index=piece_index)  # sending the req to block
+                begin = block_num * BLOCK_SIZE
+                length=min(BLOCK_SIZE,piece_length - begin)# calculating from where the block should begin
+                send_block_req(self.writer, begin=begin, piece_index=piece_index,length=length)  # sending the req to block
                 while True:
                     msg_id_of_recived_data, load =await  recv_any_message_from_peer(self.reader)
                     if msg_id_of_recived_data == 7:  # this means the it send the piece we need so we can further process the payload
@@ -90,7 +87,7 @@ class PeerConnection:
                         #     print("done writing stuff")
                         break
                     elif msg_id_of_recived_data == 1:
-                        send_block_req(self.writer, begin=begin, piece_index=piece_index)
+                        send_block_req(self.writer, begin=begin, piece_index=piece_index,length=length)
                     elif msg_id_of_recived_data == 4:
                         continue
                     else:
@@ -99,17 +96,19 @@ class PeerConnection:
         for offset in sorted(blocks.keys()):
                 full_piece += blocks[offset]
                 print(f"assembled full piece {len(full_piece)} bytes")
-        return True
+        return True , full_piece
     async  def download_loop(self):
         while not self.piece_manager.am_I_done():
             available=[i for i, has in enumerate(self.remote_bitfield) if has]
             if not available:
                 break
-            idx=await self.piece_manager.claim_piecec(available)
+            idx=await self.piece_manager.claim_piece(available)
             if idx is None:
                 break
-            success=await self.download_piece(idx)
-            await self.piece_manager.release_piece(idx, sucess)
+            success,piece_data=await self.download_piece(idx)
+            await self.piece_manager.release_piece(idx, success)
+            if piece_data:
+                await self.piece_manager.write_piece(idx,piece_data)
 
 
 
@@ -117,5 +116,4 @@ class PeerConnection:
 
 
 
-    reader_peer,writer_peer=asyncio.run(connect_to_peers())
 
