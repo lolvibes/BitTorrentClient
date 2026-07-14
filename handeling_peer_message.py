@@ -42,13 +42,13 @@ def build_bitfield(my_pieces, num_piececs):
     for i in my_pieces:
         bitfield[i//8] |=(1<<(7-(i%8))) # intially we see that peice belongs to which byte
         # then we  see the position of that peice in that byte  then we mask it to get that bit onn
-        #with the help of |=
+        #with the help o
     length=1+ len(bitfield)
     return struct.pack(">I", length)+bytes([5])+ bytes(bitfield) # packing it in raw bytes
 
 # we need to sendd the intrested to the clientin theri peice
-def send_intrested(sock):
-    sock.send(struct.pack(">I",1 )+ bytes([2]))
+def send_intrested():
+     return struct.pack(">I",1 )+ bytes([2])
 
 # no we are ginna assk the peer for the block of the piece
 BLOCK_SIZE=16*1024
