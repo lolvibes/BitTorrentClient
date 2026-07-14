@@ -1,32 +1,22 @@
 import asyncio
 import logging
-from fileinput import filename
 
+from matplotlib.style.core import available
+
+from announce import num_pieces
+
+from PieceManagerAttempt1 import generating_peer_bitfield
+from handeling_peer_message import recv_any_message_from_peer, build_bitfield, send_intrested, send_block_req,parser_peice
 from peer_handeling import handshake as h
 # import threading
 from announce import peers
+BLOCK_SIZE=16384
 logging.basicConfig(filename="peerdata.log",level=logging.INFO)
 
-async def try_connecting_with_peer(peer,handshake):
-    peer_ip,peer_port=peer
-    try:
-        reader,writer=await asyncio.wait_for(asyncio.open_connection(peer_ip,peer_port),timeout=5)
-        writer.write(handshake)
-        await writer.drain()# .drain do is give ur param handshake to the operating system to handel
 
 
-        received_handshake_from_peer=await asyncio.wait_for(reader.readexactly(68), timeout=5)
-        #checking validity of handshake we recived from peer
-        if len(received_handshake_from_peer)<68:
-            raise ValueError("incomplete handshake")
-        if received_handshake_from_peer[1:20] !=b'BitTorrent protocol':
-            raise ValueError("not the right protocol")
-        logging.info(f"peer connected : {peer_ip} {peer_port}")
-        return reader,writer
-    except Exception as e:
-        print(f"can't connected with {peer_ip} {peer_port} -{e}  ")#handeling timeout exception
-    return None,None
-#____________________________________________________________________________________________________________________________
+
+# ____________________________________________________________________________________________________________________________
 # tried creating one thread per peer to handel it all its functionality but not scalable architecture alternates are better
 # def starting_thread(peer,handshake):
 #     asyncio.run(try_connecting_with_peer(peer,handshake))
@@ -34,14 +24,98 @@ async def try_connecting_with_peer(peer,handshake):
 # for peer in peers:
 #     thread=threading.Thread(target=starting_thread,args=(peer,handshake))
 #     thread.start()
-#_______________________________________________________________________________________________________________________________
-async def connect_to_peers():
-    handshake=h
-    task=[try_connecting_with_peer(peer,handshake) for peer in peers]
-    result =await asyncio.gather(*task)
-    connected_peers=[r for r in result if r is not (None,None)]
+# _______________________________________________________________________________________________________________________________
+async def connect_to_peers(self):
+    handshake = h
+    task = [self.try_connecting_with_peer(peer, handshake) for peer in peers]
+    result = await asyncio.gather(*task)
+    connected_peers = [r for r in result if r != (None, None)]
     logging.info(len(connected_peers))
     return connected_peers
+class PeerConnection:
+    def __init__(self,reader,writer,piece_manager):
+        self.reader=reader
+        self.writer=writer
+        self.piece_manager=piece_manager
+        self.remote_bitfield=[]
+        self.am_chocked=True
+        self.am_interested=False
+    async def do_handhsake(self,handshake,peer):
+        peer_ip, peer_port = peer
+        self.reader, self.writer = await asyncio.wait_for(asyncio.open_connection(peer_ip, peer_port), timeout=5)
+        self.writer.write(handshake)
+        await self.writer.drain()
 
-asyncio.run(connect_to_peers())
+        received_handshake_from_peer = await asyncio.wait_for(self.reader.readexactly(68), timeout=5)
+        # checking validity of handshake we recived from peer
+        if len(received_handshake_from_peer) < 68:
+            raise ValueError("incomplete handshake")
+        if received_handshake_from_peer[1:20] != b'BitTorrent protocol':
+            raise ValueError("not the right protocol")
+        logging.info(f"peer connected : {peer_ip} {peer_port}")
+        return True
+
+    async def receive_message(self):
+        await recv_any_message_from_peer(self.reader)
+    async def exchange_bitfields(self):
+        message_id, payload = await asyncio.wait_for(self.receive_message(), timeout=5)
+        if message_id == 5:
+            peer_bitfield = generating_peer_bitfield(payload)
+            self.remote_bitfield=peer_bitfield
+            self.writer.write((self.piece_manager.get_my_bitfield_bytes()))
+    async def send_interested(self):
+        self.writer.write(send_intrested())
+
+    async def download_piece(self,piece_index):
+        num_pieces_in_torrent = num_pieces  # this gives the total in the torrent
+        # now here we are trying to get all the blocks in a particular piece
+        #piece_index = 0  # startign from the intial block for now
+        piece_length =self.piece_manager.get_piece_length(piece_index)  # getting the size of particular piece
+        block_numbers = (piece_length + BLOCK_SIZE -1) // BLOCK_SIZE
+        blocks = {}
+        print(f"downloading peice {piece_index}")
+        for block_num in range(block_numbers):  # looping through our no. of blocks per piece
+                begin = block_num * BLOCK_SIZE  # calculating from where the block should begin
+                send_block_req(self.writer, begin=begin, piece_index=piece_index)  # sending the req to block
+                while True:
+                    msg_id_of_recived_data, load =await  recv_any_message_from_peer(self.reader)
+                    if msg_id_of_recived_data == 7:  # this means the it send the piece we need so we can further process the payload
+                        index, begin_offset, actual_data = parser_peice(load)
+                        blocks[
+                            begin_offset] = actual_data  # stroing the block in the dict with the offset for later stiching
+                        print(
+                            f'got peice {index} which begins at the offset {begin_offset} and the length of the rest of the data {len(actual_data)}')
+                        # with open(f"peice_{index} begins_{begin_offset}.bin", 'wb') as f:
+                        #     f.write(actual_data)
+                        #     print("done writing stuff")
+                        break
+                    elif msg_id_of_recived_data == 1:
+                        send_block_req(self.writer, begin=begin, piece_index=piece_index)
+                    elif msg_id_of_recived_data == 4:
+                        continue
+                    else:
+                        print(f"unexpected the peice with message id 7 but got{msg_id_of_recived_data}")
+        full_piece = b""
+        for offset in sorted(blocks.keys()):
+                full_piece += blocks[offset]
+                print(f"assembled full piece {len(full_piece)} bytes")
+        return True
+    async  def download_loop(self):
+        while not self.piece_manager.am_I_done():
+            available=[i for i, has in enumerate(self.remote_bitfield) if has]
+            if not available:
+                break
+            idx=await self.piece_manager.claim_piecec(available)
+            if idx is None:
+                break
+            success=await self.download_piece(idx)
+            await self.piece_manager.release_piece(idx, sucess)
+
+
+
+
+
+
+
+    reader_peer,writer_peer=asyncio.run(connect_to_peers())
 
